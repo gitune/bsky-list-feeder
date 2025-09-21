@@ -82,7 +82,7 @@ $ curl 'http://localhost:8080/xrpc/app.bsky.feed.getFeedSkeleton?feed=hogehoge%2
 feed generator固有のDIDを取得して利用する方法の他に(詳細は公式参照)、上記のように自分の持つドメイン名を使ったDIDで登録することも出来、その場合は上記の例ですと下記URLに `did.json` ファイルを置いておく必要があります。serviceEndpointは上記でbsky-list-feederを公開したURLに合わせてください。
 
 ```
-$ curl https://memo.digitune.org/.well-known/did.json
+$ curl https://memo.digitune.org/.well-known/did.json # ← この決まったURL pathに置く
 {
   "@context": [
     "https://www.w3.org/ns/did/v1"
