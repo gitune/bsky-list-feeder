@@ -68,7 +68,7 @@ $ curl 'http://localhost:8080/xrpc/app.bsky.feed.getFeedSkeleton?feed=hogehoge%2
 
 ### bsky-list-feederのBlueskyへの登録
 
-動き始めたbsky-list-feederのBlueskyへの登録には、本リポジトリにあるbsky-feed-managerが使えます。こちらを利用するには、まず登録する情報を含んだ `generator.json` ファイルを用意します。
+動き始めたbsky-list-feederのBlueskyへの登録には、本リポジトリにあるbsky-feed-managerが使えます。こちらを利用するには、まず登録する情報を含んだ `generator.json` ファイルを用意し、feed ID名を持つサブディレクトリ下に置きます。
 
 ```
 {
