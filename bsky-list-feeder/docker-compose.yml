@@ -1,0 +1,16 @@
+services:
+  bsky-list-feeder:
+    build: .
+    image: bsky-list-feeder
+    container_name: bsky-list-feeder
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./feeds:/app/feeds
+    env_file: .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

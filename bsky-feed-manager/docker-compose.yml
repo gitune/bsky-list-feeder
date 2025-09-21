@@ -1,0 +1,9 @@
+services:
+  bsky-feed-manager:
+    build: .
+    image: bsky-feed-manager
+    container_name: bsky-feed-manager
+    volumes:
+      - ./:/app
+      - ../bsky-list-feeder/feeds:/app/public
+    env_file: ../bsky-list-feeder/.env
