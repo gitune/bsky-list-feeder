@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Check if both a file path and a handle are provided as arguments
-if [ -z "$1" ] || [ -z "$2" ]; then
+# Check if the number of arguments is exactly 2
+if [[ "$#" -ne 2 ]]; then
   echo "Usage: $0 <output_file> <handle>"
   echo "Example: $0 user_did.txt bsky.app"
   exit 1
@@ -19,7 +19,7 @@ fi
 DID=$(curl -s "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle=$HANDLE" | jq -r .did)
 
 # Check if a DID was successfully resolved
-if [ -n "$DID" ] && [ "$DID" != "null" ]; then
+if [[ -n "$DID" && "$DID" != "null" ]]; then
   # Create a backup of the output file
   cp -p "$OUTPUT_FILE" "$OUTPUT_FILE.old" 2>/dev/null
 
