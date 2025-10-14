@@ -31,11 +31,10 @@ const (
 
 // Global constants for HTTP headers and values
 const (
-	cacheControlHeader = "Cache-Control"
-	cacheControlValue  = "public, max-age=60"
 	contentTypeHeader  = "Content-Type"
 	contentTypeValue   = "application/json"
 	lastModifiedHeader = "Last-Modified"
+	cacheControlHeader = "Cache-Control"
 	httpTimeFormat     = http.TimeFormat
 )
 
@@ -296,7 +295,7 @@ func (f *FeedsRefresher) refreshFeed(ctx context.Context, feedCfg FeedConfig) er
 			log.Printf("Warning: Failed to load existing feed from %s, starting from scratch: %v", feedPath, err)
 		}
 	}
-
+	
 	newPosts, err := f.fetchPosts(ctx, dids, latestTime) // Pass context here
 	if err != nil {
 		return fmt.Errorf("failed to fetch posts: %w", err)
@@ -617,7 +616,11 @@ func (c *FileCache) Invalidate(feedName string) {
 	delete(c.data, feedName)
 }
 
-func feedHandler(cache *FileCache) http.HandlerFunc {
+// feedHandler handles the HTTP request for the feed skeleton. It now takes the maxAge for Cache-Control.
+func feedHandler(cache *FileCache, maxAge time.Duration) http.HandlerFunc {
+	// build Cache-Control header value
+	cacheControlValue := fmt.Sprintf("public, max-age=%d", int(maxAge.Seconds()))
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		feedParam := r.URL.Query().Get("feed")
 		if feedParam == "" {
@@ -751,7 +754,7 @@ func main() {
 	// Pass context to the refresher to allow for graceful shutdown
 	go refresher.Start(ctx, refreshInterval)
 
-	http.HandleFunc("/xrpc/app.bsky.feed.getFeedSkeleton", feedHandler(cache))
+	http.HandleFunc("/xrpc/app.bsky.feed.getFeedSkeleton", feedHandler(cache, refreshInterval))
 	log.Printf("Starting bsky feed-daemon on port %d...", *port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
