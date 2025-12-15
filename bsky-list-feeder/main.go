@@ -237,11 +237,12 @@ func NewFeedsRefresher(feeds []FeedConfig, client *BskyClient, cache *FileCache)
 	}
 }
 
-// Start refreshes feeds periodically.
+// Start handles the periodic refresh of feeds, including the first immediate refresh.
 func (f *FeedsRefresher) Start(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Perform the initial refresh immediately (non-blocking from main's perspective)
 	f.refreshAllFeeds(ctx)
 
 	for {
@@ -284,10 +285,12 @@ func (f *FeedsRefresher) refreshFeed(ctx context.Context, feedCfg FeedConfig) er
 
 	feedPath := filepath.Join(feedDir, feedFileName)
 
-	latestTime := time.Now().Add(-7 * 24 * time.Hour)
+	// Set a default latest time to fetch posts from the last 7 days
+	latestTime := time.Now().Add(-7 * 24 * time.Hour) 
 	var existingPosts *IntermediateFeed
 
 	if _, err := os.Stat(feedPath); err == nil {
+		// Attempt to load existing feed to find the latest post time
 		existingPosts, err = f.loadIntermediateFeed(feedPath)
 		if err == nil && len(existingPosts.Feed) > 0 {
 			latestTime = existingPosts.Feed[0].CreatedAt
@@ -296,21 +299,26 @@ func (f *FeedsRefresher) refreshFeed(ctx context.Context, feedCfg FeedConfig) er
 		}
 	}
 	
-	newPosts, err := f.fetchPosts(ctx, dids, latestTime) // Pass context here
+	newPosts, err := f.fetchPosts(ctx, dids, latestTime)
 	if err != nil {
 		return fmt.Errorf("failed to fetch posts: %w", err)
 	}
 
-	if len(newPosts) == 0 {
+	numNewPosts := len(newPosts) // Capture the number of new posts
+
+	if numNewPosts == 0 {
 		log.Printf("No new posts found for feed %s. Skipping file update.", feedCfg.FeedID)
 		return nil
 	}
 
 	combinedPosts := combineAndFilterPosts(newPosts, existingPosts)
-	if err := f.saveIntermediateFeed(combinedPosts, feedPath); err != nil {
+	
+	// Pass the number of new posts to saveIntermediateFeed for size limiting
+	if err := f.saveIntermediateFeed(combinedPosts, feedPath, numNewPosts); err != nil {
 		return fmt.Errorf("failed to save feed: %w", err)
 	}
 
+	// Invalidate the cache to ensure the next request loads the new file
 	f.cache.Invalidate(feedCfg.FeedID)
 
 	log.Printf("Feed %s updated successfully with %d posts.", feedCfg.FeedID, len(combinedPosts.Feed))
@@ -332,27 +340,86 @@ func (f *FeedsRefresher) loadDIDs(filePath string) ([]string, error) {
 	return dids, nil
 }
 
-// getPostTime parses the correct timestamp for a given feed item, handling reposts.
-func getPostTime(item *bsky.FeedDefs_FeedViewPost) time.Time {
-	var createdAt time.Time
-	// If the reason is a repost, use its IndexedAt time.
-	if item.Reason != nil && item.Reason.FeedDefs_ReasonRepost != nil {
-		t, err := time.Parse(time.RFC3339, item.Reason.FeedDefs_ReasonRepost.IndexedAt)
-		if err == nil {
-			createdAt = t
-		}
+// normalizeTimestamp normalizes the fractional seconds part of an RFC3339 timestamp
+// to fit time.RFC3339Nano (9 digits) by padding with zeros.
+// Example: "2025-11-17T06:00:00.1Z" -> "2025-11-17T06:00:00.100000000Z"
+func normalizeTimestamp(ts string) string {
+	// Search for the timezone specification (Z or +/-hh:mm)
+	tzIndex := strings.LastIndexFunc(ts, func(r rune) bool {
+		return r == 'Z' || r == '+' || r == '-'
+	})
+	if tzIndex == -1 {
+		return ts
 	}
 
-	// If not a repost or if parsing failed, try to get the post's creation time.
-	if createdAt.IsZero() && item.Post != nil && item.Post.Record != nil && item.Post.Record.Val != nil {
+	// Search for the decimal point of the seconds part
+	dotIndex := strings.LastIndex(ts[:tzIndex], ".")
+	if dotIndex == -1 {
+		// If no decimal point is found, return as is (time.RFC3339Nano can handle it)
+		return ts
+	}
+
+	// Extract the fractional part of the seconds
+	fractionalPart := ts[dotIndex+1 : tzIndex]
+	
+	// Number of digits in the fractional part
+	numDigits := len(fractionalPart)
+
+	// Pad with zeros to reach nanosecond precision (9 digits)
+	if numDigits < 9 {
+		padding := strings.Repeat("0", 9-numDigits)
+		
+		// Reconstruct the normalized string
+		return ts[:dotIndex+1] + fractionalPart + padding + ts[tzIndex:]
+	}
+
+    // If 9 or more digits are present, return as is (RFC3339Nano handles up to 9)
+	return ts
+}
+
+
+// getPostTime parses the correct timestamp for a given feed item, handling reposts.
+func getPostTime(item *bsky.FeedDefs_FeedViewPost) time.Time {
+	// 1. Check for Repost
+	if item.Reason != nil && item.Reason.FeedDefs_ReasonRepost != nil {
+		ts := item.Reason.FeedDefs_ReasonRepost.IndexedAt
+		
+		// Normalize the timestamp to handle variable fractional second precision,
+		// then parse using RFC3339Nano.
+		ts = normalizeTimestamp(ts)
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		
+		if err == nil {
+			return t // Success: Return the Repost time (IndexedAt)
+		}
+		
+		// Failure: Log the error and return a Zero value. This prevents the
+		// incorrect fallback to the original post's old creation time.
+		log.Printf("Warning: Failed to parse normalized repost time '%s': %v", ts, err)
+		return time.Time{}
+	}
+
+	// 2. Check for Normal Post
+	// Only look at the original post creation time if it is NOT a repost.
+	if item.Post != nil && item.Post.Record != nil && item.Post.Record.Val != nil {
 		if post, ok := item.Post.Record.Val.(*bsky.FeedPost); ok && post != nil {
-			t, err := time.Parse(time.RFC3339, post.CreatedAt)
+			ts := post.CreatedAt
+			
+			// Apply normalization to the original post's timestamp as well.
+			ts = normalizeTimestamp(ts)
+			t, err := time.Parse(time.RFC3339Nano, ts)
+
 			if err == nil {
-				createdAt = t
+				return t
 			}
+			
+			// Log failure for original post's timestamp
+			log.Printf("Warning: Failed to parse normalized post time '%s': %v", ts, err)
 		}
 	}
-	return createdAt
+	
+	// Return a Zero value if no valid timestamp could be extracted.
+	return time.Time{}
 }
 
 // MinimalRepostReason defines the simplified JSON structure for a repost reason
@@ -452,10 +519,10 @@ func (f *FeedsRefresher) fetchPosts(ctx context.Context, dids []string, latestTi
 		}
 
 		if i < len(dids)-1 {
-			log.Println("Waiting 1 second to respect rate limits...")
+			log.Println("Waiting 500 milliseconds to respect rate limits...")
 			// Use a select statement to wait, allowing for context cancellation.
 			select {
-			case <-time.After(1 * time.Second):
+			case <-time.After(500 * time.Millisecond):
 				// Wait completed.
 			case <-ctx.Done():
 				// Context cancelled, stop immediately.
@@ -509,38 +576,71 @@ func (f *FeedsRefresher) loadIntermediateFeed(filePath string) (*IntermediateFee
 	return &feedData, nil
 }
 
-func (f *FeedsRefresher) saveIntermediateFeed(feed *IntermediateFeed, filePath string) error {
+// saveIntermediateFeed saves the feed data using atomic write to prevent partial reads.
+// It accepts the number of new posts added for size limiting logic.
+func (f *FeedsRefresher) saveIntermediateFeed(feed *IntermediateFeed, filePath string, numNewPosts int) error {
+	// The original feed is encoded once for size checking/limiting.
 	feedJSON, err := json.Marshal(feed)
 	if err != nil {
 		return fmt.Errorf("failed to marshal intermediate feed: %w", err)
 	}
 
-	feedJSON = limitJSONSize(feedJSON, maxFeedSize)
+	// Apply size limiting
+	feedJSON = limitJSONSize(feedJSON, maxFeedSize, numNewPosts)
 
-	if err := os.WriteFile(filePath, feedJSON, 0644); err != nil {
-		return fmt.Errorf("failed to write auth file: %w", err)
+	// Implement Atomic Write
+	tempPath := filePath + ".tmp"
+    
+    // 1. Write to a temporary file
+	if err := os.WriteFile(tempPath, feedJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write temporary feed file: %w", err)
 	}
+    
+    // 2. Atomically rename the temporary file to the final path
+    // This ensures that readers only ever see a complete, finalized file.
+	if err := os.Rename(tempPath, filePath); err != nil {
+		return fmt.Errorf("failed to rename temp feed file: %w", err)
+	}
+    
 	return nil
 }
 
-func limitJSONSize(data []byte, limit int) []byte {
+// limitJSONSize limits the size of the JSON data by truncating the post list using a simple, fast heuristic.
+// It removes 'numNewPosts' posts from the oldest end if the limit is exceeded.
+func limitJSONSize(data []byte, limit int, numNewPosts int) []byte {
 	if len(data) <= limit {
 		return data
 	}
 
 	var tempFeed IntermediateFeed
 	if err := json.Unmarshal(data, &tempFeed); err != nil {
-		return data
+		// If unmarshal fails, return default empty feed
+		return []byte("{\"feed\":[]}")
 	}
-
-	for i := len(tempFeed.Feed); i > 0; i-- {
-		truncatedFeed := &IntermediateFeed{Feed: tempFeed.Feed[:i]}
-		truncatedJSON, _ := json.Marshal(truncatedFeed)
-		if len(truncatedJSON) <= limit {
-			return truncatedJSON
-		}
-	}
-	return []byte("{\"feed\":[]}")
+    
+    // Determine the number of posts to delete from the oldest end (tail of the array).
+    numPosts := len(tempFeed.Feed)
+    numToDelete := numNewPosts
+    
+    // Calculate the new length, ensuring it is not negative
+    newLength := numPosts - numToDelete
+    if newLength < 0 {
+        newLength = 0
+    }
+    
+    // Truncate the posts (removing the oldest ones)
+	truncatedFeed := &IntermediateFeed{Feed: tempFeed.Feed[:newLength]}
+    
+    // Marshal the truncated result once
+	truncatedJSON, err := json.Marshal(truncatedFeed)
+    if err != nil {
+        return []byte("{\"feed\":[]}")
+    }
+    
+    // NOTE: Per user request, the final JSON size may still exceed the limit, 
+    // but the truncation is performed based on the simplified heuristic.
+    
+    return truncatedJSON
 }
 
 // FileCache manages the in-memory cache for feed files.
@@ -571,10 +671,13 @@ func (c *FileCache) GetFeed(feedName string) (*BSkyFeed, error) {
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
+		// File not found (e.g., initial startup before the first refresh)
 		return nil, fmt.Errorf("bsky feed file not found: %w", err)
 	}
 
 	if cached, ok := c.data[feedName]; ok {
+		// Check if the file modification time is the same or older than the cache.
+		// os.Rename (atomic write) updates the ModTime, ensuring a reload when needed.
 		if fileInfo.ModTime().Equal(cached.LastMod) || fileInfo.ModTime().Before(cached.LastMod) {
 			log.Printf("Using cached data for bsky feed: %s", feedName)
 			return cached.Feed, nil
@@ -602,6 +705,7 @@ func (c *FileCache) GetFeed(feedName string) (*BSkyFeed, error) {
 		})
 	}
 
+	// Update the cache with the new data and file's current modification time
 	c.data[feedName] = &CachedData{
 		Feed:    &feedData,
 		LastMod: fileInfo.ModTime(),
@@ -610,6 +714,7 @@ func (c *FileCache) GetFeed(feedName string) (*BSkyFeed, error) {
 	return &feedData, nil
 }
 
+// Invalidate removes a feed from the in-memory cache.
 func (c *FileCache) Invalidate(feedName string) {
 	c.Lock()
 	defer c.Unlock()
@@ -628,16 +733,19 @@ func feedHandler(cache *FileCache, maxAge time.Duration) http.HandlerFunc {
 			return
 		}
 
+		// Extract feed name from the full AT-URI
 		parts := strings.Split(feedParam, "/")
 		feedName := parts[len(parts)-1]
 
 		filePath := filepath.Join(cache.feedsDir, feedName, feedFileName)
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
+			// If file is not found (and initial refresh hasn't completed yet), return 404
 			http.Error(w, "feed file not found", http.StatusNotFound)
 			return
 		}
 
+		// Handle If-Modified-Since header for 304 response
 		if sinceHeader := r.Header.Get("If-Modified-Since"); sinceHeader != "" {
 			sinceTime, err := time.Parse(httpTimeFormat, sinceHeader)
 			if err == nil && !fileInfo.ModTime().After(sinceTime) {
@@ -652,10 +760,13 @@ func feedHandler(cache *FileCache, maxAge time.Duration) http.HandlerFunc {
 
 		feed, err := cache.GetFeed(feedName)
 		if err != nil {
+			// GetFeed handles file not found errors, but if an internal error
+			// like JSON decoding occurs, it returns 500.
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		// Pagination logic
 		start := 0
 		if cursorStr != "" {
 			for i, item := range feed.Feed {
@@ -680,10 +791,12 @@ func feedHandler(cache *FileCache, maxAge time.Duration) http.HandlerFunc {
 			"feed": postsToReturn,
 		}
 
+		// Set the cursor for the next page
 		if end < len(feed.Feed) {
 			response["cursor"] = feed.Feed[end-1].Post
 		}
 
+		// Set response headers
 		w.Header().Set(lastModifiedHeader, fileInfo.ModTime().UTC().Format(httpTimeFormat))
 		w.Header().Set(cacheControlHeader, cacheControlValue)
 		w.Header().Set(contentTypeHeader, contentTypeValue)
@@ -704,6 +817,7 @@ func discoverFeeds(feedsDir string) ([]FeedConfig, error) {
 		if entry.IsDir() {
 			feedID := entry.Name()
 			didFilePath := filepath.Join(feedsDir, feedID, didFileName)
+			// Check if the mandatory DID file exists in the directory
 			if _, err := os.Stat(didFilePath); err == nil {
 				configs = append(configs, FeedConfig{
 					FeedID:  feedID,
@@ -750,11 +864,14 @@ func main() {
 
 	cache := NewFileCache(*feedsDir)
 	refresher := NewFeedsRefresher(feedConfigs, bskyClient, cache)
-
-	// Pass context to the refresher to allow for graceful shutdown
-	go refresher.Start(ctx, refreshInterval)
+    
+	// Start the periodic refresh loop in a goroutine immediately.
+	// The Start function will execute the first refresh asynchronously.
+	go refresher.Start(ctx, refreshInterval) 
+	log.Println("Starting periodic feed refresh and session management in background.")
 
 	http.HandleFunc("/xrpc/app.bsky.feed.getFeedSkeleton", feedHandler(cache, refreshInterval))
 	log.Printf("Starting bsky feed-daemon on port %d...", *port)
+	// Start HTTP server immediately, relying on feedHandler to check file existence.
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
