@@ -20,6 +20,13 @@ DID=$(curl -s "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handl
 
 # Check if a DID was successfully resolved
 if [[ -n "$DID" && "$DID" != "null" ]]; then
+  
+  # --- DIDの重複チェック処理 ---
+  if grep -qF "$DID" "$OUTPUT_FILE" 2>/dev/null; then
+    echo "The DID ($DID) for handle $HANDLE is already present in $OUTPUT_FILE. No changes made."
+    exit 0
+  fi
+
   # Create a backup of the output file
   cp -p "$OUTPUT_FILE" "$OUTPUT_FILE.old" 2>/dev/null
 
