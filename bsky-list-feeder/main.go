@@ -444,6 +444,7 @@ func (f *FeedsRefresher) fetchPosts(ctx context.Context, dids []string, latestTi
 
 	FetchDIDLoop:
 		for {
+			// Pass the context to the API call
 			resp, err := bsky.FeedGetAuthorFeed(ctx, f.bskyClient.GetClient(), did, cursor, "", false, int64(30))
 			if err != nil {
 				log.Printf("Error fetching feed for %s: %v", did, err)
@@ -454,6 +455,7 @@ func (f *FeedsRefresher) fetchPosts(ctx context.Context, dids []string, latestTi
 				break
 			}
 
+			// Sort the fetched posts by time in descending order
 			sort.Slice(resp.Feed, func(i, j int) bool {
 				return getPostTime(resp.Feed[i]).After(getPostTime(resp.Feed[j]))
 			})
@@ -493,6 +495,7 @@ func (f *FeedsRefresher) fetchPosts(ctx context.Context, dids []string, latestTi
 				if !ok || createdAt.After(existingPost.CreatedAt) {
 					var reasonJSON *json.RawMessage
 					if isRepost {
+						// Manually create the reason with the correct skeleton type
 						repostReason := MinimalRepostReason{
 							Type:   "app.bsky.feed.defs#skeletonReasonRepost",
 							Repost: *item.Reason.FeedDefs_ReasonRepost.Uri,
@@ -522,9 +525,12 @@ func (f *FeedsRefresher) fetchPosts(ctx context.Context, dids []string, latestTi
 
 		if i < len(dids)-1 {
 			log.Println("Waiting 500 milliseconds to respect rate limits...")
+			// Use a select statement to wait, allowing for context cancellation.
 			select {
 			case <-time.After(500 * time.Millisecond):
+				// Wait completed.
 			case <-ctx.Done():
+				// Context cancelled, stop immediately.
 				log.Println("Context cancelled during rate limit sleep, returning early.")
 				return nil, ctx.Err()
 			}
